@@ -37,6 +37,8 @@
 #include "chord.h"
 #include "hook.h"
 #include "ledgerline.h"
+#include "accidental.h"
+#include "stem.h"
 
 using namespace mu;
 
@@ -435,6 +437,152 @@ void TieSegment::layoutSegment(const PointF& p1, const PointF& p2)
     setbbox(path.boundingRect());
 }
 
+void TieSegment::adjustX()
+{
+    qreal offsetMargin = spatium() * 0.25;
+    Note* sn = tie()->startNote();
+    Note* en = tie()->endNote();
+    Chord* sc = sn->chord();
+    Chord* ec = en->chord();
+
+    // grips are in system coordinates, normalize to note position
+    PointF p1 = ups(Grip::START).p + PointF(system()->pos().x() - sn->canvasX(), 0);
+    PointF p2 = ups(Grip::END).p + PointF(system()->pos().x() - en->canvasX(), 0);
+
+    qreal xo;
+
+    // ADJUST LEFT GRIP -----------
+    if (spannerSegmentType() == SpannerSegmentType::SINGLE || spannerSegmentType() == SpannerSegmentType::BEGIN) {
+        xo = 0;
+        if (tie()->isInside()) {  // only adjust for inside-style ties
+            // for cross-voice collisions, we need a list of all notes
+            int numVoices = 0;
+            std::vector<Note*> notes;
+            std::vector<Chord*> chords;
+            int strack = sc->staffIdx() * VOICES;
+            int etrack = sc->staffIdx() * VOICES + VOICES;
+            for (int track = strack; track < etrack; ++track) {
+                if (Chord* ch = sc->measure()->findChord(sc->tick(), track)) {
+                    chords.push_back(ch);
+                    notes.insert(notes.end(), ch->notes().begin(), ch->notes().end());
+                    numVoices++;
+                }
+            }
+            for (auto note : notes) {
+                qreal chordOffset = note->chord()->x() - sc->x(); // in the case of chords in other voices
+                qreal noteX = note->x() + chordOffset;
+                // adjust for dots
+                if (sn->dots().size() > 0) {
+                    qreal dotY = note->pos().y() + note->dots().last()->y();
+                    if (qAbs(p1.y() - dotY) < spatium() * 0.5) {
+                        xo = qMax(xo, (noteX - sn->x() - p1.x()) + note->dots().last()->x() + note->dots().last()->width());
+                    }
+                }
+
+                // adjust for note collisions
+                if (note == sn) {
+                    continue;
+                }
+                qreal noteTop = note->y() + note->bbox().top();
+                qreal noteHeight = note->height();
+                if (p1.y() > noteTop && p1.y() < noteTop + noteHeight) {
+                    xo = qMax(xo, (noteX - sn->x() - p1.x()) + note->width());
+                }
+            }
+
+            // adjust for flags (hooks)
+            for (Chord* chord : chords) {
+                qreal chordX = chord->x() - sc->x();
+                if (chord->hook()) {
+                    qreal hookHeight = chord->hook()->bbox().height();
+                    // turn the hook upside down for downstems
+                    qreal hookY = chord->hook()->pos().y() - (chord->up() ? 0 : hookHeight);
+                    if (p1.y() > hookY - offsetMargin
+                        && p1.y() < hookY + hookHeight + offsetMargin) {
+                        xo = qMax(xo, (chordX + chord->hook()->x() - p1.x()) + chord->hook()->width());
+                    }
+                }
+            }
+
+            // adjust for ledger lines
+            auto currLedger = sc->ledgerLines();  // search through ledger lines and see if any are within .5sp of tie start
+            while (currLedger) {
+                if (qAbs(p1.y() - currLedger->y()) < spatium() * 0.5) {
+                    xo = qMax(xo, (currLedger->x() + currLedger->len()) - p1.x());
+                    break;
+                }
+                currLedger = currLedger->next();
+            }
+        }
+        xo += offsetMargin;
+        ups(Grip::START).p += PointF(xo, 0);
+    }
+
+    // ADJUST RIGHT GRIP ----------
+    if (spannerSegmentType() == SpannerSegmentType::SINGLE || spannerSegmentType() == SpannerSegmentType::END) {
+        xo = 0;
+        if (tie()->isInside()) {
+            for (LedgerLine* currLedger = ec->ledgerLines(); currLedger; currLedger = currLedger->next()) {
+                // search through ledger lines and see if any are within .5sp of tie end
+                if (qAbs(p2.y() - currLedger->y()) < spatium() * 0.5) {
+                    xo = qMax(xo, p2.x() - (currLedger->x() - en->x()));
+                }
+            }
+
+            // for inter-voice collisions, we need a list of all notes from all voices
+            int numVoices = 0;
+            std::vector<Note*> notes;
+            int strack = ec->staffIdx() * VOICES;
+            int etrack = ec->staffIdx() * VOICES + VOICES;
+            for (int track = strack; track < etrack; ++track) {
+                if (Chord* ch = ec->measure()->findChord(ec->tick(), track)) {
+                    notes.insert(notes.end(), ch->notes().begin(), ch->notes().end());
+                    numVoices++;
+                }
+            }
+
+            for (Note* note : notes) {
+                qreal chordOffset = note->chord()->x() - ec->x(); // in the case of chords in other voices
+                qreal noteX = note->x() + chordOffset;
+                // adjust for accidentals
+                Accidental* acc = note->accidental();
+                if (acc) {
+                    qreal accTop = (note->y() + acc->y()) + acc->bbox().top();
+                    qreal accHeight = acc->height();
+                    if (p2.y() >= accTop && p2.y() <= accTop + accHeight) {
+                        xo = qMax(xo, p2.x() - ((noteX + acc->x()) - en->x()));
+                    }
+                }
+
+                if (note == en) {
+                    continue;
+                }
+                // adjust for shifted notes (such as intervals of unison or second)
+                qreal noteTop = note->y() + note->bbox().top();
+                qreal noteHeight = note->headHeight();
+                if (p2.y() >= noteTop && p2.y() <= noteTop + noteHeight) {
+                    xo = qMax(xo, p2.x() - (noteX - en->x()));
+                }
+
+                // adjust for stems of other voices
+                if (numVoices > 1) {
+                    qreal stemDist = noteX + note->chord()->stem()->x();
+                    qreal stemLen = (note->chord()->up() ? -1 : 1) * note->chord()->stem()->len();
+
+                    if (p2.x() > stemDist && p2.y() > note->y() && p2.y() < note->y() + stemLen) {
+                        xo = qMax(xo, p2.x() - stemDist);
+                    }
+                }
+            }
+        }
+        xo += offsetMargin;
+        ups(Grip::END).p -= PointF(xo, 0);
+    }
+
+    computeBezier(); // we need to recompute because the grips have changed
+    setbbox(path.boundingRect());
+}
+
 //---------------------------------------------------------
 //   setAutoAdjust
 //---------------------------------------------------------
@@ -492,6 +640,7 @@ void Tie::slurPos(SlurPos* sp)
     qreal yOffInside  = useTablature ? yOffOutside * 0.5 : hw * .3 * __up;
 
     Chord* sc   = startNote()->chord();
+    Chord* ec = endNote()->chord();
     sp->system1 = sc->measure()->system();
     if (!sp->system1) {
         Measure* m = sc->measure();
@@ -501,7 +650,6 @@ void Tie::slurPos(SlurPos* sp)
     qreal x1, y1;
     qreal x2, y2;
     bool shortStart = false;
-    qreal offsetMargin = 0.25 * _spatium;
 
     // determine attachment points
     // similar code is used in Chord::layoutPitched()
@@ -511,120 +659,61 @@ void Tie::slurPos(SlurPos* sp)
     sp->p1    = sc->pos() + sc->segment()->pos() + sc->measure()->pos();
 
     //------p1
-    if (sc->notes().size() > 1) {
-        y1 = startNote()->pos().y() + yOffInside;
-        x1 = 0;
-        qreal xo = startNote()->pos().x() + hw;  // x offset for p1 will be at least note head width
-
-        // ADJUST FOR COLLISIONS ----------------
-
-        for (auto note : sc->notes()) {
-            // adjust for dots
-            if (startNote()->dots().size() > 0) {
-                qreal dotY = note->pos().y() + note->dots().last()->y();
-                if (qAbs(y1 - dotY) < _spatium * 0.5) {
-                    xo = qMax(xo, note->x() + note->dots().last()->x() + note->dots().last()->width());
-                }
-            }
-
-            // adjust for note collisions
-            if (note == startNote()) {
-                continue;
-            }
-            qreal noteTop = note->y();
-            qreal noteHeight = note->height();
-            if (y1 > noteTop && y1 < noteTop + noteHeight) {
-                xo = qMax(xo, note->x() + note->width());
-            }
-        }
-
-        // adjust for flags (hooks)
-        if (sc->hook() && sc->up()) {
-            if (y1 < sc->hook()->pos().y() + sc->hook()->bbox().height() + (offsetMargin * 2)) {
-                xo = qMax(xo, sc->hook()->pos().x() + sc->hook()->bbox().width());
-            }
-        }
-
-        // adjust for ledger lines
-        auto currLedger = sc->ledgerLines();  // search through ledger lines and see if any are within .5sp of tie start
-        while (currLedger) {
-            if (qAbs(y1 - currLedger->y()) < _spatium * 0.5) {
-                xo = qMax(xo, currLedger->x() + currLedger->len());
-                break;
-            }
-            currLedger = currLedger->next();
-        }
-
-        x1 += xo + offsetMargin;
+    x1 = startNote()->pos().x() + hw;
+    y1 = startNote()->pos().y();
+    qreal xo = 0;
+    if (sc->notes().size() > 1 || ec->notes().size() > 1) {
+        _isInside = true;
+        xo = 0;  // the offset for these will be decided in TieSegment::adjustX()
         shortStart = true;
-    } else if (sc->stem() && sc->up() == _up) {
-        x1 = startNote()->x() + hw * 1.12;
-        y1 = startNote()->pos().y() + yOffInside;
     } else {
-        x1 = startNote()->x() + hw * 0.65;
-        y1 = startNote()->pos().y() + yOffOutside;
+        _isInside = false;
+        if (sc->stem() && sc->up() && _up) {
+            // usually, outside ties start in the middle of the notehead, but
+            // for up-ties on up-stems, we'll start at the end of the notehead
+            // to avoid the stem
+            xo = 0;
+        }
+        else {
+            // start in the middle of the notehead for outside notes
+            xo = -(hw / 2);
+        }
     }
-    sp->p1 += PointF(x1, y1);
+    y1 += isInside() ? yOffInside : yOffOutside;
+    sp->p1 += PointF(x1 + xo, y1);
 
     //------p2
     y2 = y1;
+    xo = 0;
     if (endNote() == 0) {
         sp->p2 = sp->p1 + PointF(_spatium * 3, 0.0);
         sp->system2 = sp->system1;
         return;
     }
-    Chord* ec = endNote()->chord();
-    sp->p2    = ec->pos() + ec->segment()->pos() + ec->measure()->pos();
+    sp->p2 = ec->pos() + ec->segment()->pos() + ec->measure()->pos();
     sp->system2 = ec->measure()->system();
 
     // force tie to be horizontal except for cross-staff or if there is a difference of line (tpc, clef, tpc)
     bool horizontal = startNote()->line() == endNote()->line() && sc->vStaffIdx() == ec->vStaffIdx();
 
     hw = endNote()->tabHeadWidth(stt);
-    if (ec->notes().size() > 1) {
-        x2 = endNote()->x();
-        qreal xo = 0.0;
-
-        // ADJUST FOR COLLISIONS ----------------
-
-        // adjust for ledger lines
-        auto currLedger = ec->ledgerLines();  // search through ledger lines and see if any are within .5sp of tie end
-        while (currLedger) {
-            if (qAbs(y1 - currLedger->y()) < _spatium * 0.5) {
-                xo = qMax(xo, x2 - currLedger->x());
-            }
-            currLedger = currLedger->next();
-        }
-
-        // adjust for shifted notes (such as intervals of unison or second)
-        for (auto note : ec->notes()) {
-            if (note == endNote()) {
-                continue;
-            }
-            qreal noteTop = note->y();
-            if (y2 >= noteTop - offsetMargin && y2 <= noteTop + note->headHeight() + offsetMargin) {
-                xo = qMax(xo, x2 - note->x());
-            }
-        }
-
-        x2 -= (xo + offsetMargin);
-    } else if (ec->stem() && !ec->up() && !_up) {
-        x2 = endNote()->x() - hw * 0.12;
-        if (!horizontal) {
-            y2 = endNote()->pos().y() + yOffInside;
-        }
-    } else if (shortStart) {
-        x2 = endNote()->x() + hw * 0.15;
-        if (!horizontal) {
-            y2 = endNote()->pos().y() + yOffOutside;
-        }
+    x2 = endNote()->x();
+    if (!horizontal) {
+        y2 = endNote()->pos().y() + (isInside() ? yOffInside : yOffOutside);
+    }
+    if (isInside()) {
+        xo = 0.0;
     } else {
-        x2 = endNote()->x() + hw * 0.35;
-        if (!horizontal) {
-            y2 = endNote()->pos().y() + yOffOutside;
+        if (ec->stem() && !ec->up() && !_up) {
+            // as before, xo should account for stems that could get in the way
+            xo = 0;
+        }
+        else {
+            // start in the middle of the notehead for outside notes
+            xo = -(hw / 2);
         }
     }
-    sp->p2 += PointF(x2, y2);
+    sp->p2 += PointF(x2 - xo, y2);
 
     // adjust for cross-staff
     if (sc->vStaffIdx() != vStaffIdx() && sp->system1) {
@@ -828,8 +917,8 @@ TieSegment* Tie::layoutFor(System* system)
     calculateDirection();
 
     SlurPos sPos;
-    slurPos(&sPos);
-
+    slurPos(&sPos);  // get unadjusted x values and determine inside or outside
+    
     setPos(0, 0);
 
     int n;
@@ -845,6 +934,8 @@ TieSegment* Tie::layoutFor(System* system)
     segment->setSystem(system);   // Needed to populate System.spannerSegments
     segment->layoutSegment(sPos.p1, sPos.p2);
     segment->setSpannerSegmentType(sPos.system1 != sPos.system2 ? SpannerSegmentType::BEGIN : SpannerSegmentType::SINGLE);
+    segment->adjustX(); // adjust horizontally for inside-style ties
+
     return segment;
 }
 
