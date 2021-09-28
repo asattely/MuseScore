@@ -225,10 +225,10 @@ void TieSegment::editDrag(EditData& ed)
 //    compute help points of slur bezier segment
 //---------------------------------------------------------
 
-void TieSegment::computeBezier(PointF p6o)
+void TieSegment::computeBezier(PointF shoulderOffset)
 {
     qreal _spatium  = spatium();
-    qreal shoulderW;                // height as fraction of slur-length
+    qreal shoulderW; // height as fraction of slur-length
     qreal shoulderH;
 
     //
@@ -239,101 +239,101 @@ void TieSegment::computeBezier(PointF p6o)
     // pp5      drag
     // pp6      shoulder
     //
-    PointF pp1 = ups(Grip::START).p + ups(Grip::START).off;
-    PointF pp2 = ups(Grip::END).p + ups(Grip::END).off;
+    PointF tieStart = ups(Grip::START).p + ups(Grip::START).off;
+    PointF tieEnd = ups(Grip::END).p + ups(Grip::END).off;
 
-    PointF p2 = pp2 - pp1;         // normalize to zero
-    if (p2.x() == 0.0) {
+    PointF tieEndNormalized = tieEnd - tieStart;  // normalize to zero
+    if (tieEndNormalized.x() == 0.0) {
         qDebug("zero tie");
         return;
     }
 
-    qreal sinb = atan(p2.y() / p2.x());
+    qreal tieAngle = atan(tieEndNormalized.y() / tieEndNormalized.x()); // angle required from tie start to tie end--zero if horizontal
     Transform t;
-    t.rotateRadians(-sinb);
-    p2  = t.map(p2);
-    p6o = t.map(p6o);
+    t.rotateRadians(-tieAngle);  // rotate so that we are working with horizontal ties regardless of endpoint height difference
+    tieEndNormalized  = t.map(tieEndNormalized);  // apply that rotation
+    shoulderOffset = t.map(shoulderOffset);  // also apply to shoulderOffset
 
-    double smallH = 0.38;
-    qreal d   = p2.x() / _spatium;
-    shoulderH = d * 0.4 * smallH;
-    shoulderH = qBound(0.4, shoulderH, 1.3);
-    shoulderH *= _spatium;
+    double smallH = 0.38; // I don't know what this means currently
+    qreal tieWidthInSp = tieEndNormalized.x() / _spatium;
+    shoulderH = tieWidthInSp * 0.4 * smallH;  // 0.4 is tie minimum, variablize this
+    shoulderH = qBound(0.4, shoulderH, 1.3);  // ties are constrained to a height of 0.4sp - 1.3sp
+    shoulderH *= _spatium;  // shoulderH is now canvas units
     shoulderW = .6;
 
-    shoulderH -= p6o.y();
+    shoulderH -= shoulderOffset.y();
 
     if (!tie()->up()) {
         shoulderH = -shoulderH;
     }
 
-    qreal c    = p2.x();
-    qreal c1   = (c - c * shoulderW) * .5 + p6o.x();
-    qreal c2   = c1 + c * shoulderW + p6o.x();
+    qreal tieWidth    = tieEndNormalized.x();
+    qreal bezier1X   = (tieWidth - tieWidth * shoulderW) * .5 + shoulderOffset.x();
+    qreal bezier2X   = bezier1X + tieWidth * shoulderW + shoulderOffset.x();
 
-    PointF p5 = PointF(c * .5, 0.0);
+    PointF tieDrag = PointF(tieWidth * .5, 0.0);
 
-    PointF p3(c1, -shoulderH);
-    PointF p4(c2, -shoulderH);
+    PointF bezier1(bezier1X, -shoulderH);
+    PointF bezier2(bezier2X, -shoulderH);
 
     qreal w = score()->styleP(Sid::SlurMidWidth) - score()->styleP(Sid::SlurEndWidth);
     if (staff()) {
         w *= staff()->staffMag(tie()->tick());
     }
-    PointF th(0.0, w);      // thickness of slur
+    PointF tieThickness(0.0, w); // thickness of tie
 
-    PointF p3o = p6o + t.map(ups(Grip::BEZIER1).off);
-    PointF p4o = p6o + t.map(ups(Grip::BEZIER2).off);
+    PointF bezier1Offset = shoulderOffset + t.map(ups(Grip::BEZIER1).off);
+    PointF bezier2Offset = shoulderOffset + t.map(ups(Grip::BEZIER2).off);
 
-    if (!p6o.isNull()) {
-        PointF p6i = t.inverted().map(p6o);
-        ups(Grip::BEZIER1).off += p6i;
-        ups(Grip::BEZIER2).off += p6i;
+    if (!shoulderOffset.isNull()) {
+        PointF invertedShoulder = t.inverted().map(shoulderOffset);
+        ups(Grip::BEZIER1).off += invertedShoulder;
+        ups(Grip::BEZIER2).off += invertedShoulder;
     }
 
     //-----------------------------------calculate p6
-    PointF pp3  = p3 + p3o;
-    PointF pp4  = p4 + p4o;
-    PointF ppp4 = pp4 - pp3;
+    PointF bezier1Final  = bezier1 + bezier1Offset;
+    PointF bezier2Final  = bezier2 + bezier2Offset;
+    PointF bezierNormalized = bezier2Final - bezier1Final;
 
-    qreal r2 = atan(ppp4.y() / ppp4.x());
+    qreal bezierAngle = atan(bezierNormalized.y() / bezierNormalized.x());  // in case bezier1 and bezier2 are not horizontal
     t.reset();
-    t.rotateRadians(-r2);
-    PointF p6  = PointF(t.map(ppp4).x() * .5, 0.0);
+    t.rotateRadians(-bezierAngle);
+    PointF tieShoulder  = PointF(t.map(bezierNormalized).x() * .5, 0.0);
 
-    t.rotateRadians(2 * r2);
-    p6 = t.map(p6) + pp3 - p6o;
+    t.rotateRadians(2 * bezierAngle);
+    tieShoulder = t.map(tieShoulder) + bezier1Final - shoulderOffset;
     //-----------------------------------
 
     path = PainterPath();
     path.moveTo(PointF());
-    path.cubicTo(p3 + p3o - th, p4 + p4o - th, p2);
+    path.cubicTo(bezier1 + bezier1Offset - tieThickness, bezier2 + bezier2Offset - tieThickness, tieEndNormalized);
     if (tie()->lineType() == 0) {
-        path.cubicTo(p4 + p4o + th, p3 + p3o + th, PointF());
+        path.cubicTo(bezier2 + bezier2Offset + tieThickness, bezier1 + bezier1Offset + tieThickness, PointF());
     }
 
-    th = PointF(0.0, 3.0 * w);
+    tieThickness = PointF(0.0, 3.0 * w);
     shapePath = PainterPath();
     shapePath.moveTo(PointF());
-    shapePath.cubicTo(p3 + p3o - th, p4 + p4o - th, p2);
-    shapePath.cubicTo(p4 + p4o + th, p3 + p3o + th, PointF());
+    shapePath.cubicTo(bezier1 + bezier1Offset - tieThickness, bezier2 + bezier2Offset - tieThickness, tieEndNormalized);
+    shapePath.cubicTo(bezier2 + bezier2Offset + tieThickness, bezier1 + bezier1Offset + tieThickness, PointF());
 
     // translate back
-    double y = pp1.y();
+    double y = tieStart.y();
     const double offsetFactor = 0.2;
     if (staff()->isTabStaff(slurTie()->tick())) {
         y += (_spatium * (slurTie()->up() ? -offsetFactor : offsetFactor));
     }
     t.reset();
-    t.translate(pp1.x(), y);
-    t.rotateRadians(sinb);
+    t.translate(tieStart.x(), y);
+    t.rotateRadians(tieAngle);
     path                  = t.map(path);
     shapePath             = t.map(shapePath);
-    ups(Grip::BEZIER1).p  = t.map(p3);
-    ups(Grip::BEZIER2).p  = t.map(p4);
-    ups(Grip::END).p      = t.map(p2) - ups(Grip::END).off;
-    ups(Grip::DRAG).p     = t.map(p5);
-    ups(Grip::SHOULDER).p = t.map(p6);
+    ups(Grip::BEZIER1).p  = t.map(bezier1);
+    ups(Grip::BEZIER2).p  = t.map(bezier2);
+    ups(Grip::END).p      = t.map(tieEndNormalized) - ups(Grip::END).off;
+    ups(Grip::DRAG).p     = t.map(tieDrag);
+    ups(Grip::SHOULDER).p = t.map(tieShoulder);
 
 //      PointF staffOffset;
 //      if (system() && track() >= 0)
@@ -348,13 +348,13 @@ void TieSegment::computeBezier(PointF p6o)
 
     qreal minH = qAbs(3.0 * w);
     int nbShapes = 15;
-    const CubicBezier b(pp1, ups(Grip::BEZIER1).pos(), ups(Grip::BEZIER2).pos(), ups(Grip::END).pos());
+    const CubicBezier b(tieStart, ups(Grip::BEZIER1).pos(), ups(Grip::BEZIER2).pos(), ups(Grip::END).pos());
     for (int i = 1; i <= nbShapes; i++) {
         const PointF point = b.pointAtPercent(i / float(nbShapes));
         RectF re = RectF(start, point).normalized();
         if (re.height() < minH) {
-            d = (minH - re.height()) * .5;
-            re.adjust(0.0, -d, 0.0, d);
+            tieWidthInSp = (minH - re.height()) * .5;
+            re.adjust(0.0, -tieWidthInSp, 0.0, tieWidthInSp);
         }
         _shape.add(re);
         start = point;
